@@ -1,0 +1,21 @@
+services:
+  demoapi:
+    build: .
+    image: demoapi:latest
+    container_name: demoapi
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=8100
+      - DEMO_API_KEY=${DEMO_API_KEY:-demo-tenant-key}
+      - ATLAS_URI=${ATLAS_URI}
+      - ATLAS_DB_NAME=${ATLAS_DB_NAME:-demoapi}
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

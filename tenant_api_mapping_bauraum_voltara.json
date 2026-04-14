@@ -1,0 +1,136 @@
+{
+  "enabled": true,
+  "base_url": "http://localhost:8100",
+  "timeout_ms": 8000,
+  "auth": {
+    "type": "api_key_header_env",
+    "env_key": "tenant_api_key",
+    "header_name": "X-API-Key"
+  },
+  "operations": [
+    {
+      "operation_id": "product_search",
+      "description": "Suche nach Produkten im BauRaum-Katalog.",
+      "method": "GET",
+      "path": "/v1/products/search",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string",
+            "description": "Suchbegriff, z.B. voltara bohrmaschine"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "required": [
+          "q"
+        ]
+      },
+      "query_map": {
+        "q": "q",
+        "limit": "limit"
+      },
+      "response_path": "items"
+    },
+    {
+      "operation_id": "product_by_barcode",
+      "description": "Finde Produkt ueber EAN/Barcode.",
+      "method": "GET",
+      "path": "/v1/products/barcode/{barcode}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "barcode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "barcode"
+        ]
+      },
+      "path_params_map": {
+        "barcode": "barcode"
+      },
+      "response_path": "item"
+    },
+    {
+      "operation_id": "product_details",
+      "description": "Hole Produktdetails per product_id.",
+      "method": "GET",
+      "path": "/v1/products/{product_id}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id"
+        ]
+      },
+      "path_params_map": {
+        "product_id": "product_id"
+      },
+      "response_path": "item"
+    },
+    {
+      "operation_id": "product_availability",
+      "description": "Pruefe Verfuegbarkeit fuer einen Store.",
+      "method": "GET",
+      "path": "/v1/products/{product_id}/availability",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string"
+          },
+          "store_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id",
+          "store_id"
+        ]
+      },
+      "path_params_map": {
+        "product_id": "product_id"
+      },
+      "query_map": {
+        "store_id": "store_id"
+      }
+    },
+    {
+      "operation_id": "product_location",
+      "description": "Liefere Position im Markt fuer Display-Navigation.",
+      "method": "GET",
+      "path": "/v1/products/{product_id}/location",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string"
+          },
+          "store_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id",
+          "store_id"
+        ]
+      },
+      "path_params_map": {
+        "product_id": "product_id"
+      },
+      "query_map": {
+        "store_id": "store_id"
+      }
+    }
+  ]
+}
