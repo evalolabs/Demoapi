@@ -2,9 +2,7 @@ import json
 import os
 import random
 import sqlite3
-import unicodedata
 from datetime import datetime, timezone
-from difflib import SequenceMatcher, get_close_matches
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -49,15 +47,6 @@ GENERIC_CATEGORIES = [
 ]
 
 GENERIC_BRANDS = ["WerkFox", "ProLine", "Crafton", "BuildStar", "HandWerk", "TopGear", "MetalPro"]
-COMMON_ASR_CORRECTIONS = {
-    "woltarra": "voltara",
-    "volltara": "voltara",
-    "voltarra": "voltara",
-    "voltera": "voltara",
-    "boltara": "voltara",
-    "bohr maschine": "bohrmaschine",
-    "borhmaschine": "bohrmaschine",
-}
 
 app = FastAPI(title=APP_NAME, version="1.0.0")
 
@@ -308,101 +297,6 @@ def _row_to_product(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def _normalize_text(value: str) -> str:
-    text = unicodedata.normalize("NFKD", str(value or "").lower())
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    out = []
-    prev_space = False
-    for ch in text:
-        if ch.isalnum():
-            out.append(ch)
-            prev_space = False
-        else:
-            if not prev_space:
-                out.append(" ")
-                prev_space = True
-    return "".join(out).strip()
-
-
-def _apply_common_asr_corrections(query: str) -> str:
-    corrected = _normalize_text(query)
-    for wrong, right in COMMON_ASR_CORRECTIONS.items():
-        corrected = corrected.replace(wrong, right)
-    return corrected.strip()
-
-
-def _build_query_candidates(raw_query: str) -> List[str]:
-    candidates: List[str] = []
-    base = raw_query.strip()
-    if base:
-        candidates.append(base)
-
-    corrected = _apply_common_asr_corrections(raw_query)
-    if corrected and corrected not in candidates:
-        candidates.append(corrected)
-
-    tokens = corrected.split()
-    if tokens:
-        fixed_tokens = []
-        for token in tokens:
-            close = get_close_matches(token, ["voltara", "bohrmaschine"], n=1, cutoff=0.76)
-            fixed_tokens.append(close[0] if close else token)
-        fixed = " ".join(fixed_tokens).strip()
-        if fixed and fixed not in candidates:
-            candidates.append(fixed)
-
-    return candidates
-
-
-def _sql_search_products(search_query: str, limit: int) -> List[sqlite3.Row]:
-    pattern = f"%{search_query.lower()}%"
-    with get_conn() as conn:
-        return conn.execute(
-            """
-            SELECT * FROM products
-            WHERE
-                lower(name) LIKE ? OR
-                lower(brand) LIKE ? OR
-                lower(category_name) LIKE ? OR
-                lower(sku) LIKE ? OR
-                lower(barcode) LIKE ?
-            ORDER BY
-                CASE WHEN lower(brand) = 'voltara' THEN 0 ELSE 1 END,
-                name ASC
-            LIMIT ?
-            """,
-            (pattern, pattern, pattern, pattern, pattern, limit),
-        ).fetchall()
-
-
-def _fuzzy_search_products(raw_query: str, limit: int) -> List[sqlite3.Row]:
-    query_norm = _normalize_text(raw_query)
-    if not query_norm:
-        return []
-
-    with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM products").fetchall()
-
-    scored: List[tuple[float, sqlite3.Row]] = []
-    for row in rows:
-        haystack = _normalize_text(
-            f"{row['name']} {row['brand']} {row['category_name']} {row['sku']} {row['barcode']}"
-        )
-        ratio = SequenceMatcher(None, query_norm, haystack).ratio()
-        token_bonus = 0.0
-        for tok in query_norm.split():
-            if tok and tok in haystack:
-                token_bonus += 0.12
-        if "voltara" in haystack:
-            token_bonus += 0.05
-        score = ratio + token_bonus
-        if score >= 0.42:
-            scored.append((score, row))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [row for _, row in scored[:limit]]
-
-
 @app.on_event("startup")
 def startup() -> None:
     stats = seed_data_if_empty()
@@ -430,25 +324,27 @@ def product_search(
     limit: int = Query(10, ge=1, le=100),
     _: None = Depends(_auth_guard),
 ) -> Dict[str, Any]:
-    rows: List[sqlite3.Row] = []
-    effective_query = q
-
-    for candidate in _build_query_candidates(q):
-        rows = _sql_search_products(candidate, limit)
-        if rows:
-            effective_query = candidate
-            break
-
-    # Fallback for speech-to-text issues and misspellings.
-    if not rows:
-        rows = _fuzzy_search_products(q, limit)
-        if rows:
-            effective_query = _apply_common_asr_corrections(q)
+    pattern = f"%{q.lower()}%"
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM products
+            WHERE
+                lower(name) LIKE ? OR
+                lower(brand) LIKE ? OR
+                lower(category_name) LIKE ? OR
+                lower(sku) LIKE ? OR
+                lower(barcode) LIKE ?
+            ORDER BY
+                CASE WHEN lower(brand) = 'voltara' THEN 0 ELSE 1 END,
+                name ASC
+            LIMIT ?
+            """,
+            (pattern, pattern, pattern, pattern, pattern, limit),
+        ).fetchall()
 
     return {
         "query": q,
-        "effective_query": effective_query,
-        "query_corrected": effective_query != q,
         "count": len(rows),
         "items": [_row_to_product(r) for r in rows],
     }
