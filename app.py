@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -303,6 +304,46 @@ def startup() -> None:
     print(f"[demoapi] ready - products={stats['products']} inventory_rows={stats['inventory_rows']} db={DB_PATH}")
 
 
+def _search_query_tokens(q: str) -> List[str]:
+    """Split search string into non-empty lowercase tokens (whitespace-separated)."""
+    s = (q or "").lower().strip()
+    if not s:
+        return []
+    return [t for t in re.split(r"\s+", s) if t]
+
+
+# Columns used for multi-token search: every token must match at least one column (AND across tokens).
+_PRODUCT_SEARCH_FIELDS = (
+    "lower(name)",
+    "lower(brand)",
+    "lower(category_name)",
+    "lower(sku)",
+    "lower(barcode)",
+)
+
+
+def _product_search_sql_and_params(tokens: List[str], limit: int) -> tuple[str, tuple]:
+    """Build SQL: each token matches (name|brand|category|sku|barcode); tokens are AND-combined."""
+    groups: List[str] = []
+    params: List[str] = []
+    for tok in tokens:
+        pattern = f"%{tok}%"
+        inner = " OR ".join(f"{col} LIKE ?" for col in _PRODUCT_SEARCH_FIELDS)
+        groups.append(f"({inner})")
+        params.extend([pattern] * len(_PRODUCT_SEARCH_FIELDS))
+    where_clause = " AND ".join(groups)
+    sql = f"""
+            SELECT * FROM products
+            WHERE {where_clause}
+            ORDER BY
+                CASE WHEN lower(brand) = 'voltara' THEN 0 ELSE 1 END,
+                name ASC
+            LIMIT ?
+            """
+    params.append(limit)
+    return sql.strip(), tuple(params)
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     with get_conn() as conn:
@@ -324,24 +365,12 @@ def product_search(
     limit: int = Query(10, ge=1, le=100),
     _: None = Depends(_auth_guard),
 ) -> Dict[str, Any]:
-    pattern = f"%{q.lower()}%"
+    tokens = _search_query_tokens(q)
+    if not tokens:
+        return {"query": q, "count": 0, "items": []}
+    sql, bind_params = _product_search_sql_and_params(tokens, limit)
     with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM products
-            WHERE
-                lower(name) LIKE ? OR
-                lower(brand) LIKE ? OR
-                lower(category_name) LIKE ? OR
-                lower(sku) LIKE ? OR
-                lower(barcode) LIKE ?
-            ORDER BY
-                CASE WHEN lower(brand) = 'voltara' THEN 0 ELSE 1 END,
-                name ASC
-            LIMIT ?
-            """,
-            (pattern, pattern, pattern, pattern, pattern, limit),
-        ).fetchall()
+        rows = conn.execute(sql, bind_params).fetchall()
 
     return {
         "query": q,
