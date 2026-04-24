@@ -3,6 +3,7 @@ import os
 import random
 import re
 import sqlite3
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -322,15 +323,74 @@ _PRODUCT_SEARCH_FIELDS = (
 )
 
 
-def _product_search_sql_and_params(tokens: List[str], limit: int) -> tuple[str, tuple]:
-    """Build SQL: each token matches (name|brand|category|sku|barcode); tokens are AND-combined."""
+def _catalog_lexicon(conn: sqlite3.Connection) -> set[str]:
+    """Build token lexicon from current catalog for generic future-proof query expansion."""
+    rows = conn.execute("SELECT name, brand, category_name, sku, barcode FROM products").fetchall()
+    lexicon: set[str] = set()
+    for row in rows:
+        blob = " ".join(
+            str(row[k] or "")
+            for k in ("name", "brand", "category_name", "sku", "barcode")
+        ).lower()
+        for tok in re.split(r"[^a-z0-9äöüß]+", blob):
+            t = tok.strip()
+            if len(t) >= 3:
+                lexicon.add(t)
+    return lexicon
+
+
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _expand_query_token(token: str, lexicon: set[str]) -> List[str]:
+    """Expand a token via lexical similarity/subtoken evidence without hardcoding product types."""
+    tok = str(token or "").strip().lower()
+    if not tok:
+        return []
+    out: List[str] = [tok]
+    # Prefer vocabulary-aware expansions from catalog.
+    if tok not in lexicon:
+        scored: List[tuple[float, str]] = []
+        for candidate in lexicon:
+            if candidate == tok:
+                continue
+            # Keep cheap prefilter to limit work.
+            if tok[:2] and candidate[:2] != tok[:2] and tok not in candidate and candidate not in tok:
+                continue
+            s = _similarity(tok, candidate)
+            if s >= 0.72:
+                scored.append((s, candidate))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _, cand in scored[:3]:
+            if cand not in out:
+                out.append(cand)
+        # Substring decomposition helps compounds (e.g., akkuschrauber -> schrauber).
+        subtokens = sorted(
+            [cand for cand in lexicon if len(cand) >= 4 and cand in tok and cand != tok],
+            key=len,
+            reverse=True,
+        )
+        for sub in subtokens[:2]:
+            if sub not in out:
+                out.append(sub)
+    return out[:4]
+
+
+def _product_search_sql_and_params(tokens: List[str], limit: int, lexicon: set[str]) -> tuple[str, tuple]:
+    """Build SQL: each token-group matches one of expanded terms across search fields (AND across groups)."""
     groups: List[str] = []
     params: List[str] = []
     for tok in tokens:
-        pattern = f"%{tok}%"
-        inner = " OR ".join(f"{col} LIKE ?" for col in _PRODUCT_SEARCH_FIELDS)
-        groups.append(f"({inner})")
-        params.extend([pattern] * len(_PRODUCT_SEARCH_FIELDS))
+        expanded = _expand_query_token(tok, lexicon)
+        token_or_groups: List[str] = []
+        for et in expanded:
+            pattern = f"%{et}%"
+            inner = " OR ".join(f"{col} LIKE ?" for col in _PRODUCT_SEARCH_FIELDS)
+            token_or_groups.append(f"({inner})")
+            params.extend([pattern] * len(_PRODUCT_SEARCH_FIELDS))
+        if token_or_groups:
+            groups.append(f"({' OR '.join(token_or_groups)})")
     where_clause = " AND ".join(groups)
     sql = f"""
             SELECT * FROM products
@@ -368,8 +428,9 @@ def product_search(
     tokens = _search_query_tokens(q)
     if not tokens:
         return {"query": q, "count": 0, "items": []}
-    sql, bind_params = _product_search_sql_and_params(tokens, limit)
     with get_conn() as conn:
+        lexicon = _catalog_lexicon(conn)
+        sql, bind_params = _product_search_sql_and_params(tokens, limit, lexicon)
         rows = conn.execute(sql, bind_params).fetchall()
 
     return {
